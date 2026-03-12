@@ -1,0 +1,28 @@
+# Binaries
+hint
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Build output
+bin/
+dist/
+build/
+
+# Test & coverage
+*.test
+*.out
+coverage.out
+
+# Go workspace files (optional/local)
+go.work
+go.work.sum
+
+# Editor/OS files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
