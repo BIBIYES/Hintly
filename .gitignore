@@ -1,5 +1,5 @@
 # Binaries
-hint
+/hint
 *.exe
 *.exe~
 *.dll
