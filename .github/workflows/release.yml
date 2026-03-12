@@ -192,3 +192,110 @@ jobs:
             dist/*.zip
             dist/*.tar.gz
             dist/checksums.txt
+
+      - name: Resolve release metadata
+        id: release_meta
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.tag }}"
+          else
+            VERSION="${GITHUB_REF_NAME}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "version_no_v=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew tap formula
+        env:
+          HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          HOMEBREW_TAP_REPO: ${{ vars.HOMEBREW_TAP_REPO }}
+          VERSION: ${{ steps.release_meta.outputs.version }}
+          VERSION_NO_V: ${{ steps.release_meta.outputs.version_no_v }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${HOMEBREW_TAP_TOKEN:-}" ]; then
+            echo "Missing secret: HOMEBREW_TAP_TOKEN"
+            exit 1
+          fi
+
+          tap_repo="${HOMEBREW_TAP_REPO:-BIBIYES/homebrew-tap}"
+
+          get_sha() {
+            local file="$1"
+            awk -v f="dist/${file}" '$2 == f {print $1}' dist/checksums.txt
+          }
+
+          darwin_amd64_file="hint_${VERSION}_darwin-amd64.tar.gz"
+          darwin_arm64_file="hint_${VERSION}_darwin-arm64.tar.gz"
+          linux_amd64_file="hint_${VERSION}_linux-amd64.tar.gz"
+          linux_arm64_file="hint_${VERSION}_linux-arm64.tar.gz"
+
+          darwin_amd64_sha="$(get_sha "${darwin_amd64_file}")"
+          darwin_arm64_sha="$(get_sha "${darwin_arm64_file}")"
+          linux_amd64_sha="$(get_sha "${linux_amd64_file}")"
+          linux_arm64_sha="$(get_sha "${linux_arm64_file}")"
+
+          for sha in \
+            "${darwin_amd64_sha}" \
+            "${darwin_arm64_sha}" \
+            "${linux_amd64_sha}" \
+            "${linux_arm64_sha}"; do
+            if [ -z "${sha}" ]; then
+              echo "Failed to resolve one or more SHA256 values from dist/checksums.txt"
+              cat dist/checksums.txt
+              exit 1
+            fi
+          done
+
+          git clone --depth 1 "https://x-access-token:${HOMEBREW_TAP_TOKEN}@github.com/${tap_repo}.git" tap
+          mkdir -p tap/Formula
+
+          cat > tap/Formula/hintly.rb <<EOF
+          class Hintly < Formula
+            desc "AI command assistant for terminal"
+            homepage "https://github.com/BIBIYES/Hintly"
+            version "${VERSION_NO_V}"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/BIBIYES/Hintly/releases/download/v#{version}/hint_v#{version}_darwin-arm64.tar.gz"
+                sha256 "${darwin_arm64_sha}"
+              else
+                url "https://github.com/BIBIYES/Hintly/releases/download/v#{version}/hint_v#{version}_darwin-amd64.tar.gz"
+                sha256 "${darwin_amd64_sha}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/BIBIYES/Hintly/releases/download/v#{version}/hint_v#{version}_linux-arm64.tar.gz"
+                sha256 "${linux_arm64_sha}"
+              else
+                url "https://github.com/BIBIYES/Hintly/releases/download/v#{version}/hint_v#{version}_linux-amd64.tar.gz"
+                sha256 "${linux_amd64_sha}"
+              end
+            end
+
+            def install
+              bin.install "hint"
+            end
+
+            test do
+              assert_predicate bin/"hint", :exist?
+            end
+          end
+          EOF
+
+          cd tap
+          if git diff --quiet -- Formula/hintly.rb; then
+            echo "No formula changes detected; skip commit."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/hintly.rb
+          git commit -m "chore: bump hintly to ${VERSION_NO_V}"
+
+          default_branch="$(git symbolic-ref refs/remotes/origin/HEAD | sed 's@^refs/remotes/origin/@@')"
+          git push origin "HEAD:${default_branch}"
