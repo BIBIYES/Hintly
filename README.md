@@ -34,6 +34,26 @@ go mod tidy
 go build ./cmd/hint
 ```
 
+## Linux 一键安装/更新
+
+安装最新版本（同一命令也用于更新到最新）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install-linux.sh | bash
+```
+
+安装指定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install-linux.sh | VERSION=v1.0.3 bash
+```
+
+安装到用户目录（无 sudo 场景）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install-linux.sh | INSTALL_DIR="$HOME/.local/bin" bash
+```
+
 ## 使用
 
 1. 初始化：
