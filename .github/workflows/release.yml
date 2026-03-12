@@ -132,8 +132,16 @@ jobs:
           build_dir="dist/${target}"
           mkdir -p "${build_dir}"
 
+          # Auto-detect main package to avoid hard-coded project layout.
+          main_pkg="$(go list -f '{{if eq .Name "main"}}{{.ImportPath}}{{end}}' ./... | sed '/^$/d' | head -n 1)"
+          if [ -z "${main_pkg}" ]; then
+            echo "No main package found. Repository tree:"
+            find . -maxdepth 3 -type f | sort
+            exit 1
+          fi
+
           bin_name="hint${{ matrix.ext }}"
-          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${build_dir}/${bin_name}" ./cmd/hint
+          CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o "${build_dir}/${bin_name}" "${main_pkg}"
           cp README.md "${build_dir}/README.md"
 
           package_name="hint_${version}_${target}"
