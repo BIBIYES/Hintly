@@ -59,8 +59,8 @@ go build ./cmd/hint
 
 默认配置路径：
 
-- macOS/Linux：`~/.config/hint/config.yaml`（支持读取旧路径 `~/Library/Application Support/hint/config.yaml`）
-- Windows：`%AppData%/hint/config.yaml`
+- 所有系统统一：`~/.config/hint/config.yaml`
+- Windows 对应路径：`%UserProfile%/.config/hint/config.yaml`
 
 配置示例：
 

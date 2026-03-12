@@ -7,7 +7,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -39,18 +38,6 @@ func (c Config) Validate() error {
 }
 
 func ConfigPath() (string, error) {
-	if runtime.GOOS == "windows" {
-		dir, err := os.UserConfigDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve user config dir: %w", err)
-		}
-		return filepath.Join(dir, appName, configFile), nil
-	}
-
-	// Keep macOS/Linux on XDG-like ~/.config path for consistency.
-	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
-		return filepath.Join(xdg, appName, configFile), nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("resolve user home dir: %w", err)
@@ -61,16 +48,15 @@ func ConfigPath() (string, error) {
 func Load() (Config, error) {
 	var cfg Config
 
-	path, err := firstExistingConfigPath()
+	path, err := ConfigPath()
 	if err != nil {
 		return cfg, err
 	}
-	if path == "" {
-		expectedPath, e := ConfigPath()
-		if e != nil {
-			return cfg, e
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return cfg, fmt.Errorf("config not found at %s", path)
 		}
-		return cfg, fmt.Errorf("config not found at %s", expectedPath)
+		return cfg, fmt.Errorf("stat config: %w", err)
 	}
 
 	v := viper.New()
@@ -146,29 +132,4 @@ func prompt(scanner *bufio.Scanner, out io.Writer, key, fallback string) string 
 		return fallback
 	}
 	return v
-}
-
-func firstExistingConfigPath() (string, error) {
-	primary, err := ConfigPath()
-	if err != nil {
-		return "", err
-	}
-	paths := []string{primary}
-	if legacy, err := legacyConfigPath(); err == nil && legacy != "" && legacy != primary {
-		paths = append(paths, legacy)
-	}
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
-		}
-	}
-	return "", nil
-}
-
-func legacyConfigPath() (string, error) {
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve legacy user config dir: %w", err)
-	}
-	return filepath.Join(dir, appName, configFile), nil
 }
