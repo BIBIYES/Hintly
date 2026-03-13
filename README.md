@@ -31,39 +31,34 @@
 
 ## 亮点
 
-- 单次命令模式：`hint "你的需求"`。
-- Agent 对话模式：仅输入 `hint` 进入多轮执行模式（思考 -> 执行 -> 读取结果 -> 再决策）。
+- 单次命令模式：`hint "你的需求"`，快速生成并执行单条命令。
+- Agent 对话模式：直接输入 `hint`，进入多轮任务式交互。
 - 自动注入环境上下文：`GOOS`、发行版、Shell、当前工作目录。
-- 内置安全扫描：命中危险命令关键字会阻断执行。
+- 命令执行更稳妥：支持危险命令拦截、执行前确认、会话级免确认。
 
-## 快速开始
+## 安装
 
-1. 构建：
+### macOS 快速安装
 
-```bash
-go mod tidy
-go build ./cmd/hint
-```
-
-2. 初始化配置：
+推荐直接使用 Homebrew：
 
 ```bash
-./hint -init
+brew install BIBIYES/tap/hintly
 ```
 
-3. 单次命令模式：
+安装完成后可用下面命令完成初始化：
 
 ```bash
-./hint "查看 fail2ban sshd 封禁情况"
+hint -init
 ```
 
-4. Agent 对话模式：
+如需更新：
 
 ```bash
-./hint
+brew upgrade hintly
 ```
 
-## Linux 一键安装/更新
+### Linux 一键安装 / 更新
 
 安装最新版本（同一命令也用于更新）：
 
@@ -83,9 +78,52 @@ curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install
 curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install-linux.sh | INSTALL_DIR="$HOME/.local/bin" bash
 ```
 
-## 使用截图
+### 从源码构建
 
-![Hintly usage screenshot](assets/image.png)
+1. 拉取依赖并构建：
+
+```bash
+go mod tidy
+go build ./cmd/hint
+```
+
+2. 初始化配置：
+
+```bash
+./hint -init
+```
+
+## 快速开始
+
+1. 初始化配置：
+
+```bash
+hint -init
+```
+
+2. 单次命令模式：
+
+```bash
+hint "查看 fail2ban sshd 封禁情况"
+```
+
+3. Agent 对话模式：
+
+```bash
+hint
+```
+
+## 界面预览
+
+### 单次命令模式
+
+![Hintly single command mode](assets/image.png)
+
+### Agent 对话模式
+
+`assets/image1.png` 展示的是对话模式下的用户界面：
+
+![Hintly agent chat mode](assets/image1.png)
 
 ## 单次命令模式快捷键
 
@@ -96,9 +134,13 @@ curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install
 
 ## Agent 对话模式说明
 
-- 输入目标后，Agent 会自动执行多步命令，直到完成或达到最大步数上限。
-- 终端会显示每一步的思考、命令和命令输出。
-- 输入 `exit` 或 `quit` 退出对话模式。
+- 直接运行 `hint` 进入 Agent 对话模式。
+- Agent 会按“思考 -> 生成命令 -> 等待确认 -> 执行 -> 读取结果 -> 再决策”的流程工作。
+- 每次 AI 产生命令后，按 `Enter` 执行当前命令。
+- 如果你确认当前会话后续命令都可以自动执行，按 `y` 可开启本会话免确认。
+- 如果当前命令不想执行，按 `n` 跳过，让 Agent 尝试其他方案。
+- 可使用 `↑/↓`、`PgUp/PgDn` 或鼠标滚轮查看历史聊天记录。
+- `Esc` / `Ctrl+C` 可随时退出对话模式。
 
 ## 配置文件路径
 
