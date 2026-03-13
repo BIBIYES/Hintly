@@ -81,6 +81,9 @@ type model struct {
 
 	pendingThought string
 	pendingCommand string
+
+	awaitingConfirm     bool
+	autoApproveCommands bool
 }
 
 // Run launches the chat-style agent UI.
@@ -109,7 +112,7 @@ func Run(_ io.Reader, _ io.Writer, client *ai.Client, env sysinfo.Env) error {
 	m.append(roleSystem, "System", "欢迎使用 Hintly Agent。底部输入目标并回车，Agent 会自动多步执行直到完成。")
 	m.refreshViewport()
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
@@ -130,6 +133,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "esc":
 			return m, tea.Quit
+		}
+
+		if m.handleScrollKey(msg.String()) {
+			return m, nil
+		}
+
+		if m.awaitingConfirm {
+			return m.handleConfirmKey(msg)
+		}
+
+		switch msg.String() {
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
@@ -143,17 +157,21 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.startGoal(text)
 			return m, tea.Batch(waitEvent(m.eventCh), m.spin.Tick)
-		case "pgup", "b":
-			m.viewport.HalfViewUp()
-			return m, nil
-		case "pgdown", "f":
-			m.viewport.HalfViewDown()
-			return m, nil
 		}
 
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(msg)
 		return m, cmd
+
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			m.viewport.LineUp(3)
+			return m, nil
+		case tea.MouseButtonWheelDown:
+			m.viewport.LineDown(3)
+			return m, nil
+		}
 
 	case streamDeltaMsg:
 		m.streamBuf += msg.delta
@@ -175,6 +193,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(roleAgent, "Agent", msg.action.Final)
 			m.running = false
 			m.executing = false
+			m.awaitingConfirm = false
+			m.pendingThought = ""
+			m.pendingCommand = ""
 			m.refreshViewport()
 			return m, nil
 		case "command":
@@ -193,14 +214,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.startPlanning()
 				return m, tea.Batch(waitEvent(m.eventCh), m.spin.Tick)
 			}
-			m.executing = true
+			if m.autoApproveCommands {
+				return m.executePendingCommand()
+			}
+			m.awaitingConfirm = true
+			m.append(roleSystem, "System", "等待确认：Enter 执行 | y 本会话免确认并执行 | n 跳过")
 			m.refreshViewport()
-			m.executeCommand(m.pendingCommand)
-			return m, tea.Batch(waitEvent(m.eventCh), m.spin.Tick)
+			return m, nil
 		default:
 			m.append(roleSystem, "System", "Agent 输出了未知动作，已停止本轮任务。")
 			m.running = false
 			m.executing = false
+			m.awaitingConfirm = false
 			m.refreshViewport()
 			return m, nil
 		}
@@ -209,6 +234,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.streaming = false
 		m.executing = false
 		m.running = false
+		m.awaitingConfirm = false
 		m.streamMsgIdx = -1
 		m.append(roleSystem, "System", "Agent 规划失败: "+msg.err.Error())
 		m.refreshViewport()
@@ -242,6 +268,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.append(roleSystem, "System", fmt.Sprintf("[exit=%d]\n%s", ob.ExitCode, ob.Output))
 		}
 		m.steps = append(m.steps, ob)
+		m.pendingThought = ""
+		m.pendingCommand = ""
 		m.refreshViewport()
 
 		m.startPlanning()
@@ -268,12 +296,17 @@ func (m *model) View() string {
 
 func (m *model) renderHeader() string {
 	status := "Ready"
-	if m.streaming {
+	if m.awaitingConfirm {
+		status = "等待命令确认"
+	} else if m.streaming {
 		status = "Agent 思考中 " + m.spin.View()
 	} else if m.executing {
 		status = "Agent 执行命令中 " + m.spin.View()
 	}
 	head := fmt.Sprintf("Hintly Agent Chat | %s | %s | %s", m.env.Distro, m.env.Shell, status)
+	if m.autoApproveCommands {
+		head += " | Auto-Approve: ON"
+	}
 	return lipgloss.NewStyle().
 		Foreground(lipgloss.Color("15")).
 		Background(lipgloss.Color("24")).
@@ -283,11 +316,17 @@ func (m *model) renderHeader() string {
 }
 
 func (m *model) renderFooter() string {
-	help := "Enter 发送 | PgUp/PgDn 滚动 | Esc/Ctrl+C 退出"
-	box := lipgloss.NewStyle().
+	help := "Enter 发送 | PgUp/PgDn/↑↓ 滚动 | 鼠标滚轮查看历史 | Esc/Ctrl+C 退出"
+	if m.awaitingConfirm {
+		help = "Enter 执行 | y 本会话免确认并执行 | n 跳过 | PgUp/PgDn/↑↓ 滚动 | Esc/Ctrl+C 退出"
+	}
+	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
-		Padding(0, 1).
+		Padding(0, 1)
+	boxWidth := max(10, m.width-boxStyle.GetHorizontalFrameSize())
+	box := boxStyle.
+		Width(boxWidth).
 		Render(m.input.View())
 	return lipgloss.JoinVertical(lipgloss.Left, box, lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(help))
 }
@@ -314,34 +353,35 @@ func (m *model) refreshViewport() {
 }
 
 func (m *model) renderMessage(msg chatMessage) string {
-	maxBubbleWidth := max(24, m.viewport.Width-8)
-
-	titleStyle := lipgloss.NewStyle().Bold(true)
-	bodyStyle := lipgloss.NewStyle().Width(maxBubbleWidth).UnsetPadding()
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1)
+	bubbleWidth := max(20, m.viewport.Width-boxStyle.GetHorizontalFrameSize())
+	titleStyle := lipgloss.NewStyle().Bold(true)
+	bodyStyle := lipgloss.NewStyle().Width(bubbleWidth).UnsetPadding()
 
 	switch msg.role {
 	case roleUser:
 		titleStyle = titleStyle.Foreground(lipgloss.Color("15"))
 		bodyStyle = bodyStyle.Foreground(lipgloss.Color("15"))
-		box := boxStyle.
+		return boxStyle.
 			Background(lipgloss.Color("62")).
 			BorderForeground(lipgloss.Color("63")).
+			Width(bubbleWidth).
 			Render(titleStyle.Render(msg.title) + "\n" + bodyStyle.Render(msg.content))
-		return lipgloss.PlaceHorizontal(m.viewport.Width, lipgloss.Right, box)
 	case roleAgent:
 		titleStyle = titleStyle.Foreground(lipgloss.Color("10"))
 		bodyStyle = bodyStyle.Foreground(lipgloss.Color("15"))
 		return boxStyle.
 			BorderForeground(lipgloss.Color("10")).
+			Width(bubbleWidth).
 			Render(titleStyle.Render(msg.title) + "\n" + bodyStyle.Render(msg.content))
 	default:
 		titleStyle = titleStyle.Foreground(lipgloss.Color("14"))
 		bodyStyle = bodyStyle.Foreground(lipgloss.Color("252"))
 		return boxStyle.
 			BorderForeground(lipgloss.Color("8")).
+			Width(bubbleWidth).
 			Render(titleStyle.Render(msg.title) + "\n" + bodyStyle.Render(msg.content))
 	}
 }
@@ -357,9 +397,9 @@ func (m *model) startGoal(goal string) {
 	m.streamMsgIdx = -1
 	m.pendingThought = ""
 	m.pendingCommand = ""
+	m.awaitingConfirm = false
 
 	m.append(roleUser, "You", goal)
-	m.append(roleSystem, "System", fmt.Sprintf("开始执行目标（最多 %d 步）", maxSteps))
 	m.refreshViewport()
 	m.startPlanning()
 }
@@ -372,7 +412,8 @@ func (m *model) startPlanning() {
 		m.running = false
 		m.streaming = false
 		m.executing = false
-		m.append(roleSystem, "System", fmt.Sprintf("达到最大步数 %d，任务停止。", maxSteps))
+		m.awaitingConfirm = false
+		m.append(roleSystem, "System", "任务已停止：当前规划轮次未能完成，请调整目标后重试。")
 		m.refreshViewport()
 		return
 	}
@@ -445,12 +486,78 @@ func (m *model) layout() {
 		bodyHeight = 5
 	}
 
-	m.viewport.Width = max(20, m.width-2)
+	m.viewport.Width = max(20, m.width)
 	m.viewport.Height = bodyHeight
 
-	inputWidth := max(10, m.width-8)
+	inputStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		Padding(0, 1)
+	inputWidth := max(10, m.width-inputStyle.GetHorizontalFrameSize())
 	m.input.Width = inputWidth
 	m.refreshViewport()
+}
+
+func (m *model) handleScrollKey(key string) bool {
+	switch key {
+	case "up":
+		m.viewport.LineUp(1)
+		return true
+	case "down":
+		m.viewport.LineDown(1)
+		return true
+	case "pgup":
+		m.viewport.HalfViewUp()
+		return true
+	case "pgdown":
+		m.viewport.HalfViewDown()
+		return true
+	default:
+		return false
+	}
+}
+
+func (m *model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch strings.ToLower(msg.String()) {
+	case "enter":
+		return m.executePendingCommand()
+	case "y":
+		m.autoApproveCommands = true
+		m.append(roleSystem, "System", "已开启本会话命令免确认。")
+		return m.executePendingCommand()
+	case "n":
+		ob := ai.AgentObservation{
+			Thought:  m.pendingThought,
+			Command:  m.pendingCommand,
+			Output:   "skipped by user confirmation",
+			ExitCode: -1,
+		}
+		m.awaitingConfirm = false
+		m.pendingThought = ""
+		m.pendingCommand = ""
+		m.steps = append(m.steps, ob)
+		m.append(roleSystem, "System", "已跳过当前命令，Agent 将尝试其他方案。")
+		m.refreshViewport()
+		m.startPlanning()
+		if m.running {
+			return m, tea.Batch(waitEvent(m.eventCh), m.spin.Tick)
+		}
+		return m, nil
+	default:
+		return m, nil
+	}
+}
+
+func (m *model) executePendingCommand() (tea.Model, tea.Cmd) {
+	command := strings.TrimSpace(m.pendingCommand)
+	if command == "" {
+		m.awaitingConfirm = false
+		return m, nil
+	}
+	m.awaitingConfirm = false
+	m.executing = true
+	m.refreshViewport()
+	m.executeCommand(command)
+	return m, tea.Batch(waitEvent(m.eventCh), m.spin.Tick)
 }
 
 func waitEvent(ch <-chan tea.Msg) tea.Cmd {
