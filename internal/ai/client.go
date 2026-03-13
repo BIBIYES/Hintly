@@ -312,6 +312,13 @@ func parseAgentActionText(content string) (AgentAction, error) {
 	s = strings.TrimSuffix(s, "```")
 	s = strings.TrimSpace(s)
 
+	var jsonAction AgentAction
+	if err := json.Unmarshal([]byte(s), &jsonAction); err == nil {
+		if action, ok := normalizeAgentAction(jsonAction); ok {
+			return action, nil
+		}
+	}
+
 	var action AgentAction
 	current := ""
 
@@ -319,19 +326,24 @@ func parseAgentActionText(content string) (AgentAction, error) {
 	for _, raw := range lines {
 		line := strings.TrimRight(raw, "\r")
 		trimmed := strings.TrimSpace(line)
+		if key, value, ok := splitAgentField(trimmed); ok {
+			switch key {
+			case "type":
+				action.Type = value
+				current = ""
+			case "thought":
+				action.Thought = value
+				current = "thought"
+			case "command":
+				action.Command = value
+				current = "command"
+			case "final":
+				action.Final = value
+				current = "final"
+			}
+			continue
+		}
 		switch {
-		case strings.HasPrefix(strings.ToUpper(trimmed), "TYPE:"):
-			action.Type = strings.ToLower(strings.TrimSpace(trimmed[len("TYPE:"):]))
-			current = ""
-		case strings.HasPrefix(strings.ToUpper(trimmed), "THOUGHT:"):
-			action.Thought = strings.TrimSpace(trimmed[len("THOUGHT:"):])
-			current = "thought"
-		case strings.HasPrefix(strings.ToUpper(trimmed), "COMMAND:"):
-			action.Command = strings.TrimSpace(trimmed[len("COMMAND:"):])
-			current = "command"
-		case strings.HasPrefix(strings.ToUpper(trimmed), "FINAL:"):
-			action.Final = strings.TrimSpace(trimmed[len("FINAL:"):])
-			current = "final"
 		default:
 			if trimmed == "" {
 				continue
@@ -359,23 +371,72 @@ func parseAgentActionText(content string) (AgentAction, error) {
 		}
 	}
 
-	action.Type = strings.ToLower(strings.TrimSpace(action.Type))
+	if normalized, ok := normalizeAgentAction(action); ok {
+		return normalized, nil
+	}
+	return AgentAction{}, fmt.Errorf("unsupported agent action type: %s", strings.TrimSpace(action.Type))
+}
+
+func splitAgentField(line string) (key, value string, ok bool) {
+	if line == "" {
+		return "", "", false
+	}
+	for _, sep := range []string{":", "：", "="} {
+		if idx := strings.Index(line, sep); idx > 0 {
+			key = strings.ToLower(strings.TrimSpace(line[:idx]))
+			value = strings.TrimSpace(line[idx+len(sep):])
+			switch key {
+			case "type", "thought", "command", "final":
+				return key, value, true
+			default:
+				return "", "", false
+			}
+		}
+	}
+	return "", "", false
+}
+
+func normalizeAgentAction(action AgentAction) (AgentAction, bool) {
+	action.Type = normalizeActionType(action.Type)
 	action.Thought = strings.TrimSpace(action.Thought)
 	action.Command = strings.TrimSpace(action.Command)
 	action.Final = strings.TrimSpace(action.Final)
+
+	if action.Type == "" {
+		switch {
+		case action.Command != "" && action.Final == "":
+			action.Type = "command"
+		case action.Final != "" && action.Command == "":
+			action.Type = "final"
+		}
+	}
 
 	switch action.Type {
 	case "command":
 		action.Command = sanitize(action.Command)
 		if action.Command == "" {
-			return AgentAction{}, fmt.Errorf("agent returned empty command")
+			return AgentAction{}, false
 		}
+		return action, true
 	case "final":
 		if action.Final == "" {
-			return AgentAction{}, fmt.Errorf("agent returned empty final message")
+			return AgentAction{}, false
 		}
+		return action, true
 	default:
-		return AgentAction{}, fmt.Errorf("unsupported agent action type: %s", action.Type)
+		return AgentAction{}, false
 	}
-	return action, nil
+}
+
+func normalizeActionType(v string) string {
+	s := strings.ToLower(strings.TrimSpace(v))
+	s = strings.Trim(s, "`\"'[](){}.,;:：-")
+	switch s {
+	case "command", "cmd", "shell", "run":
+		return "command"
+	case "final", "done", "answer", "result":
+		return "final"
+	default:
+		return s
+	}
 }

@@ -320,6 +320,9 @@ func (m *model) renderFooter() string {
 	if m.awaitingConfirm {
 		help = "Enter 执行 | y 本会话免确认并执行 | n 跳过 | PgUp/PgDn/↑↓ 滚动 | Esc/Ctrl+C 退出"
 	}
+	helpStyle := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("8")).
+		Width(max(20, m.width))
 	boxStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("8")).
@@ -328,7 +331,7 @@ func (m *model) renderFooter() string {
 	box := boxStyle.
 		Width(boxWidth).
 		Render(m.input.View())
-	return lipgloss.JoinVertical(lipgloss.Left, box, lipgloss.NewStyle().Foreground(lipgloss.Color("8")).Render(help))
+	return lipgloss.JoinVertical(lipgloss.Left, box, helpStyle.Render(help))
 }
 
 func (m *model) append(role messageRole, title, content string) int {
@@ -479,21 +482,22 @@ func (m *model) layout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
 	}
-	headerHeight := 1
-	footerHeight := 4
-	bodyHeight := m.height - headerHeight - footerHeight
-	if bodyHeight < 5 {
-		bodyHeight = 5
-	}
-
-	m.viewport.Width = max(20, m.width)
-	m.viewport.Height = bodyHeight
-
 	inputStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		Padding(0, 1)
 	inputWidth := max(10, m.width-inputStyle.GetHorizontalFrameSize())
 	m.input.Width = inputWidth
+
+	m.viewport.Width = max(20, m.width)
+
+	headerHeight := lipgloss.Height(m.renderHeader())
+	footerHeight := lipgloss.Height(m.renderFooter())
+	bodyHeight := m.height - headerHeight - footerHeight
+	if bodyHeight < 5 {
+		bodyHeight = 5
+	}
+
+	m.viewport.Height = bodyHeight
 	m.refreshViewport()
 }
 
