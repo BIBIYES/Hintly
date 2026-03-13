@@ -38,8 +38,8 @@ type chatMessage struct {
 	content string
 }
 
-type streamDeltaMsg struct {
-	delta string
+type streamEventMsg struct {
+	event ai.AgentStreamEvent
 }
 
 type streamDoneMsg struct {
@@ -75,8 +75,8 @@ type model struct {
 	executing    bool
 	currentGoal  string
 	steps        []ai.AgentObservation
+	sessionTurns []ai.AgentTurn
 	stepCount    int
-	streamBuf    string
 	streamMsgIdx int
 
 	pendingThought string
@@ -173,17 +173,18 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-	case streamDeltaMsg:
-		m.streamBuf += msg.delta
-		m.updateStreamThought()
+	case streamEventMsg:
+		m.updateStreamSummary(msg.event)
 		return m, waitEvent(m.eventCh)
 
 	case streamDoneMsg:
 		m.streaming = false
 		if m.streamMsgIdx >= 0 && m.streamMsgIdx < len(m.messages) {
-			m.messages[m.streamMsgIdx].content = strings.TrimSpace(msg.action.Thought)
-			if m.messages[m.streamMsgIdx].content == "" {
-				m.messages[m.streamMsgIdx].content = "已完成思考。"
+			thought := strings.TrimSpace(msg.action.Thought)
+			if thought == "" {
+				m.messages = append(m.messages[:m.streamMsgIdx], m.messages[m.streamMsgIdx+1:]...)
+			} else {
+				m.messages[m.streamMsgIdx].content = formatSummaryText(thought)
 			}
 		}
 		m.streamMsgIdx = -1
@@ -194,6 +195,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.running = false
 			m.executing = false
 			m.awaitingConfirm = false
+			m.archiveCurrentTurn(msg.action.Final)
 			m.pendingThought = ""
 			m.pendingCommand = ""
 			m.refreshViewport()
@@ -235,7 +237,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.executing = false
 		m.running = false
 		m.awaitingConfirm = false
+		if m.streamMsgIdx >= 0 && m.streamMsgIdx < len(m.messages) {
+			m.messages = append(m.messages[:m.streamMsgIdx], m.messages[m.streamMsgIdx+1:]...)
+		}
 		m.streamMsgIdx = -1
+		m.archiveCurrentTurn("任务失败: " + msg.err.Error())
 		m.append(roleSystem, "System", "Agent 规划失败: "+msg.err.Error())
 		m.refreshViewport()
 		return m, nil
@@ -299,7 +305,7 @@ func (m *model) renderHeader() string {
 	if m.awaitingConfirm {
 		status = "等待命令确认"
 	} else if m.streaming {
-		status = "Agent 思考中 " + m.spin.View()
+		status = "Agent 状态更新中 " + m.spin.View()
 	} else if m.executing {
 		status = "Agent 执行命令中 " + m.spin.View()
 	}
@@ -396,7 +402,6 @@ func (m *model) startGoal(goal string) {
 	m.currentGoal = goal
 	m.steps = nil
 	m.stepCount = 0
-	m.streamBuf = ""
 	m.streamMsgIdx = -1
 	m.pendingThought = ""
 	m.pendingCommand = ""
@@ -416,7 +421,9 @@ func (m *model) startPlanning() {
 		m.streaming = false
 		m.executing = false
 		m.awaitingConfirm = false
-		m.append(roleSystem, "System", "任务已停止：当前规划轮次未能完成，请调整目标后重试。")
+		result := "任务已停止：当前规划轮次未能完成，请调整目标后重试。"
+		m.archiveCurrentTurn(result)
+		m.append(roleSystem, "System", result)
 		m.refreshViewport()
 		return
 	}
@@ -424,12 +431,12 @@ func (m *model) startPlanning() {
 	m.stepCount++
 	m.streaming = true
 	m.executing = false
-	m.streamBuf = ""
-	m.streamMsgIdx = m.append(roleAgent, "Agent", "思考中...")
+	m.streamMsgIdx = m.append(roleAgent, "Agent", "状态更新中...")
 	m.refreshViewport()
 
 	goal := m.currentGoal
 	stepsCopy := append([]ai.AgentObservation(nil), m.steps...)
+	historyCopy := append([]ai.AgentTurn(nil), m.sessionTurns...)
 	env := m.env
 	client := m.client
 	ch := m.eventCh
@@ -439,11 +446,12 @@ func (m *model) startPlanning() {
 		defer cancel()
 
 		action, err := client.NextAgentActionStream(ctx, ai.AgentRequest{
-			Goal:  goal,
-			Env:   env,
-			Steps: stepsCopy,
-		}, func(delta string) {
-			ch <- streamDeltaMsg{delta: delta}
+			Goal:    goal,
+			Env:     env,
+			Steps:   stepsCopy,
+			History: historyCopy,
+		}, func(event ai.AgentStreamEvent) {
+			ch <- streamEventMsg{event: event}
 		})
 		if err != nil {
 			ch <- streamErrMsg{err: err}
@@ -465,17 +473,33 @@ func (m *model) executeCommand(command string) {
 	}()
 }
 
-func (m *model) updateStreamThought() {
+func (m *model) updateStreamSummary(event ai.AgentStreamEvent) {
+	if event.Event != "summary" {
+		return
+	}
 	if m.streamMsgIdx < 0 || m.streamMsgIdx >= len(m.messages) {
 		return
 	}
-
-	thought := extractField(m.streamBuf, "THOUGHT:")
-	if thought == "" {
-		thought = "思考中..."
+	summary := strings.TrimSpace(event.Summary)
+	if summary == "" {
+		summary = "状态更新中..."
 	}
-	m.messages[m.streamMsgIdx].content = thought
+	m.messages[m.streamMsgIdx].content = formatSummaryText(summary)
 	m.refreshViewport()
+}
+
+func (m *model) archiveCurrentTurn(outcome string) {
+	goal := strings.TrimSpace(m.currentGoal)
+	if goal == "" {
+		return
+	}
+	turn := ai.AgentTurn{
+		Goal:    goal,
+		Outcome: strings.TrimSpace(outcome),
+		Steps:   summarizeTurnSteps(m.steps),
+	}
+	m.sessionTurns = append(m.sessionTurns, turn)
+	m.currentGoal = ""
 }
 
 func (m *model) layout() {
@@ -570,26 +594,6 @@ func waitEvent(ch <-chan tea.Msg) tea.Cmd {
 	}
 }
 
-func extractField(v, field string) string {
-	upper := strings.ToUpper(v)
-	marker := strings.ToUpper(field)
-	start := strings.Index(upper, marker)
-	if start == -1 {
-		return ""
-	}
-	raw := v[start+len(field):]
-	raw = strings.TrimLeft(raw, " \t\r\n")
-
-	limit := len(raw)
-	upperRaw := strings.ToUpper(raw)
-	for _, next := range []string{"\nTYPE:", "\nCOMMAND:", "\nFINAL:", "\nTHOUGHT:"} {
-		if idx := strings.Index(upperRaw, next); idx >= 0 && idx < limit {
-			limit = idx
-		}
-	}
-	return strings.TrimSpace(raw[:limit])
-}
-
 func clipOutput(v string) string {
 	s := strings.TrimSpace(v)
 	if len(s) <= maxOutputChars {
@@ -603,4 +607,32 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func formatSummaryText(summary string) string {
+	s := strings.TrimSpace(summary)
+	if s == "" {
+		return "状态更新中..."
+	}
+	return "状态: " + s
+}
+
+func summarizeTurnSteps(steps []ai.AgentObservation) []ai.AgentObservation {
+	if len(steps) == 0 {
+		return nil
+	}
+	summary := make([]ai.AgentObservation, len(steps))
+	for i, step := range steps {
+		summary[i] = step
+		summary[i].Output = clipSessionOutput(step.Output)
+	}
+	return summary
+}
+
+func clipSessionOutput(v string) string {
+	s := strings.TrimSpace(v)
+	if len(s) <= 600 {
+		return s
+	}
+	return s[:600] + "\n...(truncated for session context)"
 }

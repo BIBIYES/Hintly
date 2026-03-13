@@ -1,6 +1,11 @@
 package ai
 
-import "testing"
+import (
+	"strings"
+	"testing"
+
+	"hint/pkg/sysinfo"
+)
 
 func TestParseAgentActionText(t *testing.T) {
 	tests := []struct {
@@ -10,44 +15,33 @@ func TestParseAgentActionText(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name:  "standard command format",
-			input: "TYPE: command\nTHOUGHT: check service\nCOMMAND: systemctl status caddy",
+			name: "supports ndjson command protocol",
+			input: "{\"event\":\"summary\",\"summary\":\"先检查 fail2ban sshd 状态\"}\n" +
+				"{\"event\":\"action\",\"action\":{\"type\":\"command\",\"command\":\"fail2ban-client status sshd\"}}",
 			want: AgentAction{
 				Type:    "command",
-				Thought: "check service",
-				Command: "systemctl status caddy",
+				Thought: "先检查 fail2ban sshd 状态",
+				Command: "fail2ban-client status sshd",
 			},
 		},
 		{
-			name:  "missing type infers command",
-			input: "THOUGHT: restart service first\nCOMMAND: systemctl restart caddy",
-			want: AgentAction{
-				Type:    "command",
-				Thought: "restart service first",
-				Command: "systemctl restart caddy",
-			},
-		},
-		{
-			name:  "supports chinese colon",
-			input: "TYPE：final\nTHOUGHT：已经完成检查\nFINAL：Caddy 已成功启动。",
+			name: "supports ndjson final protocol",
+			input: "{\"event\":\"summary\",\"summary\":\"已经拿到检查结果\"}\n" +
+				"{\"event\":\"action\",\"action\":{\"type\":\"final\",\"final\":\"当前 sshd jail 中共有 2 个封禁 IP。\"}}",
 			want: AgentAction{
 				Type:    "final",
-				Thought: "已经完成检查",
-				Final:   "Caddy 已成功启动。",
+				Thought: "已经拿到检查结果",
+				Final:   "当前 sshd jail 中共有 2 个封禁 IP。",
 			},
 		},
 		{
-			name:  "supports json payload",
-			input: `{"type":"command","thought":"check status","command":"systemctl status caddy"}`,
-			want: AgentAction{
-				Type:    "command",
-				Thought: "check status",
-				Command: "systemctl status caddy",
-			},
+			name:    "rejects legacy text protocol",
+			input:   "TYPE: command\nTHOUGHT: check service\nCOMMAND: systemctl status caddy",
+			wantErr: true,
 		},
 		{
-			name:    "rejects unsupported type",
-			input:   "TYPE: plan\nTHOUGHT: think more",
+			name:    "rejects plain action json without event wrapper",
+			input:   `{"type":"command","thought":"check status","command":"systemctl status caddy"}`,
 			wantErr: true,
 		},
 	}
@@ -68,5 +62,69 @@ func TestParseAgentActionText(t *testing.T) {
 				t.Fatalf("unexpected action:\n got: %+v\nwant: %+v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestParseAgentStreamChunks(t *testing.T) {
+	chunk1 := "{\"event\":\"summary\",\"summary\":\"先检查"
+	chunk2 := " fail2ban sshd 状态\"}\n{\"event\":\"action\",\"action\":{\"type\":\"command\",\"command\":\"fail2ban-client status sshd\"}}\n"
+
+	events, rest, err := parseAgentStreamChunks(chunk1, false)
+	if err != nil {
+		t.Fatalf("unexpected error on partial chunk: %v", err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("expected no complete events yet, got %d", len(events))
+	}
+	if rest != chunk1 {
+		t.Fatalf("unexpected rest after partial chunk: %q", rest)
+	}
+
+	events, rest, err = parseAgentStreamChunks(chunk1+chunk2, false)
+	if err != nil {
+		t.Fatalf("unexpected error on complete chunks: %v", err)
+	}
+	if rest != "" {
+		t.Fatalf("expected empty rest, got %q", rest)
+	}
+	if len(events) != 2 {
+		t.Fatalf("expected 2 events, got %d", len(events))
+	}
+	if events[0].Event != "summary" || events[0].Summary != "先检查 fail2ban sshd 状态" {
+		t.Fatalf("unexpected summary event: %+v", events[0])
+	}
+	if events[1].Event != "action" || events[1].Action.Command != "fail2ban-client status sshd" {
+		t.Fatalf("unexpected action event: %+v", events[1])
+	}
+}
+
+func TestBuildAgentChatRequestIncludesSessionHistory(t *testing.T) {
+	client := &Client{}
+	req, err := client.buildAgentChatRequest(AgentRequest{
+		Goal: "然后再看看日志",
+		Env: sysinfo.Env{
+			GOOS:   "linux",
+			Distro: "ubuntu",
+			Shell:  "/bin/zsh",
+			PWD:    "/srv/app",
+		},
+		History: []AgentTurn{
+			{
+				Goal:    "重启 caddy",
+				Outcome: "Caddy 已成功重启。",
+			},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(req.Messages) != 2 {
+		t.Fatalf("expected 2 messages, got %d", len(req.Messages))
+	}
+	userContent := req.Messages[1].Content
+	for _, want := range []string{"本次会话历史(JSON数组)", "重启 caddy", "Caddy 已成功重启。", "然后再看看日志"} {
+		if !strings.Contains(userContent, want) {
+			t.Fatalf("expected user content to include %q, got: %s", want, userContent)
+		}
 	}
 }

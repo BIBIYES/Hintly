@@ -37,10 +37,17 @@ type AgentObservation struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+type AgentTurn struct {
+	Goal    string             `json:"goal"`
+	Outcome string             `json:"outcome"`
+	Steps   []AgentObservation `json:"steps,omitempty"`
+}
+
 type AgentRequest struct {
-	Goal  string
-	Env   sysinfo.Env
-	Steps []AgentObservation
+	Goal    string
+	Env     sysinfo.Env
+	Steps   []AgentObservation
+	History []AgentTurn
 }
 
 type AgentAction struct {
@@ -48,6 +55,12 @@ type AgentAction struct {
 	Thought string `json:"thought"`
 	Command string `json:"command,omitempty"`
 	Final   string `json:"final,omitempty"`
+}
+
+type AgentStreamEvent struct {
+	Event   string      `json:"event"`
+	Summary string      `json:"summary,omitempty"`
+	Action  AgentAction `json:"action,omitempty"`
 }
 
 type chatRequest struct {
@@ -134,20 +147,12 @@ func (c *Client) NextAgentAction(ctx context.Context, req AgentRequest) (AgentAc
 	return action, nil
 }
 
-func (c *Client) NextAgentActionStream(ctx context.Context, req AgentRequest, onDelta func(string)) (AgentAction, error) {
+func (c *Client) NextAgentActionStream(ctx context.Context, req AgentRequest, onEvent func(AgentStreamEvent)) (AgentAction, error) {
 	body, err := c.buildAgentChatRequest(req, true)
 	if err != nil {
 		return AgentAction{}, err
 	}
-	content, err := c.callChatStream(ctx, body, onDelta)
-	if err != nil {
-		return AgentAction{}, err
-	}
-	action, err := parseAgentActionText(content)
-	if err != nil {
-		return AgentAction{}, err
-	}
-	return action, nil
+	return c.callAgentEventStream(ctx, body, onEvent)
 }
 
 func (c *Client) callChat(ctx context.Context, body chatRequest) (string, error) {
@@ -171,16 +176,16 @@ func (c *Client) callChat(ctx context.Context, body chatRequest) (string, error)
 	return out.Choices[0].Message.Content, nil
 }
 
-func (c *Client) callChatStream(ctx context.Context, body chatRequest, onDelta func(string)) (string, error) {
+func (c *Client) callAgentEventStream(ctx context.Context, body chatRequest, onEvent func(AgentStreamEvent)) (AgentAction, error) {
 	endpoint := chatCompletionsEndpoint(c.cfg.BaseURL)
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return "", fmt.Errorf("marshal stream request: %w", err)
+		return AgentAction{}, fmt.Errorf("marshal stream request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(payload))
 	if err != nil {
-		return "", fmt.Errorf("create stream request: %w", err)
+		return AgentAction{}, fmt.Errorf("create stream request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.cfg.APIKey)
 	req.Header.Set("Content-Type", "application/json")
@@ -188,19 +193,23 @@ func (c *Client) callChatStream(ctx context.Context, body chatRequest, onDelta f
 
 	resp, err := c.http.GetClient().Do(req)
 	if err != nil {
-		return "", fmt.Errorf("request ai stream failed: %w", err)
+		return AgentAction{}, fmt.Errorf("request ai stream failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return "", fmt.Errorf("ai stream response status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+		return AgentAction{}, fmt.Errorf("ai stream response status %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 1024), 1024*1024)
 
 	var out strings.Builder
+	var pending string
+	var lastSummary string
+	var action AgentAction
+	var actionSeen bool
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || !strings.HasPrefix(line, "data:") {
@@ -232,20 +241,66 @@ func (c *Client) callChatStream(ctx context.Context, body chatRequest, onDelta f
 			continue
 		}
 		out.WriteString(part)
-		if onDelta != nil {
-			onDelta(part)
+		pending += part
+		events, rest, err := parseAgentStreamChunks(pending, false)
+		if err != nil {
+			return AgentAction{}, err
+		}
+		pending = rest
+		for _, parsed := range events {
+			if parsed.Event == "summary" {
+				lastSummary = parsed.Summary
+			}
+			if parsed.Event == "action" && !actionSeen {
+				action = parsed.Action
+				if strings.TrimSpace(action.Thought) == "" {
+					action.Thought = lastSummary
+				}
+				actionSeen = true
+			}
+			if onEvent != nil {
+				onEvent(parsed)
+			}
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return "", fmt.Errorf("read ai stream: %w", err)
+		return AgentAction{}, fmt.Errorf("read ai stream: %w", err)
 	}
-	return out.String(), nil
+	if pending != "" {
+		events, _, err := parseAgentStreamChunks(pending, true)
+		if err != nil {
+			return AgentAction{}, err
+		}
+		for _, parsed := range events {
+			if parsed.Event == "summary" {
+				lastSummary = parsed.Summary
+			}
+			if parsed.Event == "action" && !actionSeen {
+				action = parsed.Action
+				if strings.TrimSpace(action.Thought) == "" {
+					action.Thought = lastSummary
+				}
+				actionSeen = true
+			}
+			if onEvent != nil {
+				onEvent(parsed)
+			}
+		}
+	}
+	if actionSeen {
+		return action, nil
+	}
+	return AgentAction{}, fmt.Errorf("agent stream did not produce a valid structured action event")
 }
 
 func (c *Client) buildAgentChatRequest(req AgentRequest, stream bool) (chatRequest, error) {
 	stepsJSON, err := json.Marshal(req.Steps)
 	if err != nil {
 		return chatRequest{}, fmt.Errorf("marshal agent steps: %w", err)
+	}
+	historyJSON, err := json.Marshal(req.History)
+	if err != nil {
+		return chatRequest{}, fmt.Errorf("marshal agent history: %w", err)
 	}
 
 	return chatRequest{
@@ -255,15 +310,18 @@ func (c *Client) buildAgentChatRequest(req AgentRequest, stream bool) (chatReque
 			{
 				Role: "system",
 				Content: fmt.Sprintf("你是运维 Agent。你会分步完成目标，必要时执行 shell 命令并根据输出继续决策。\n"+
-					"你必须使用以下纯文本格式输出，不要 Markdown、不要代码块。\n"+
-					"TYPE: command 或 final\n"+
-					"THOUGHT: 简短思考（1-2句）\n"+
-					"COMMAND: 仅当 TYPE=command 时提供一条可执行命令\n"+
-					"FINAL: 仅当 TYPE=final 时提供结果总结\n"+
+					"你必须输出 NDJSON 事件流，每行一个 JSON 对象，不要 Markdown、不要代码块、不要任何额外文本。\n"+
+					"第一行必须是 summary 事件，格式：{\"event\":\"summary\",\"summary\":\"一句简短状态\"}\n"+
+					"第二行必须是 action 事件，格式之一：\n"+
+					"{\"event\":\"action\",\"action\":{\"type\":\"command\",\"command\":\"单条可执行命令\"}}\n"+
+					"{\"event\":\"action\",\"action\":{\"type\":\"final\",\"final\":\"结果总结\"}}\n"+
 					"规则：\n"+
-					"1) 未完成时返回 TYPE=command。\n"+
-					"2) 完成或无法继续时返回 TYPE=final。\n"+
-					"3) command 必须是单条可执行命令。\n"+
+					"0) 这是一个持续会话，用户可能基于上文继续追问；你必须结合会话历史理解代词、省略和后续操作。\n"+
+					"1) summary 必须简短、客观，不要把尚未执行的命令说成已经完成。\n"+
+					"2) 未完成时 action.type 必须是 command。\n"+
+					"3) 完成或无法继续时 action.type 必须是 final。\n"+
+					"4) command 必须是单条可执行命令。\n"+
+					"5) 除这两行 JSON 外不要输出任何其他内容。\n"+
 					"环境信息: GOOS=%s, Distro=%s, Shell=%s, PWD=%s",
 					req.Env.GOOS,
 					req.Env.Distro,
@@ -273,8 +331,9 @@ func (c *Client) buildAgentChatRequest(req AgentRequest, stream bool) (chatReque
 			},
 			{
 				Role: "user",
-				Content: fmt.Sprintf("用户目标：%s\n\n历史执行记录(JSON数组)：%s",
+				Content: fmt.Sprintf("当前用户输入：%s\n\n本次会话历史(JSON数组)：%s\n\n当前轮执行记录(JSON数组)：%s",
 					strings.TrimSpace(req.Goal),
+					string(historyJSON),
 					string(stepsJSON),
 				),
 			},
@@ -312,88 +371,98 @@ func parseAgentActionText(content string) (AgentAction, error) {
 	s = strings.TrimSuffix(s, "```")
 	s = strings.TrimSpace(s)
 
-	var jsonAction AgentAction
-	if err := json.Unmarshal([]byte(s), &jsonAction); err == nil {
-		if action, ok := normalizeAgentAction(jsonAction); ok {
-			return action, nil
-		}
+	if _, action, err := parseAgentEventText(s); err == nil {
+		return action, nil
 	}
-
-	var action AgentAction
-	current := ""
-
-	lines := strings.Split(s, "\n")
-	for _, raw := range lines {
-		line := strings.TrimRight(raw, "\r")
-		trimmed := strings.TrimSpace(line)
-		if key, value, ok := splitAgentField(trimmed); ok {
-			switch key {
-			case "type":
-				action.Type = value
-				current = ""
-			case "thought":
-				action.Thought = value
-				current = "thought"
-			case "command":
-				action.Command = value
-				current = "command"
-			case "final":
-				action.Final = value
-				current = "final"
-			}
-			continue
-		}
-		switch {
-		default:
-			if trimmed == "" {
-				continue
-			}
-			switch current {
-			case "thought":
-				if action.Thought == "" {
-					action.Thought = trimmed
-				} else {
-					action.Thought += " " + trimmed
-				}
-			case "command":
-				if action.Command == "" {
-					action.Command = trimmed
-				} else {
-					action.Command += " " + trimmed
-				}
-			case "final":
-				if action.Final == "" {
-					action.Final = trimmed
-				} else {
-					action.Final += " " + trimmed
-				}
-			}
-		}
-	}
-
-	if normalized, ok := normalizeAgentAction(action); ok {
-		return normalized, nil
-	}
-	return AgentAction{}, fmt.Errorf("unsupported agent action type: %s", strings.TrimSpace(action.Type))
+	return AgentAction{}, fmt.Errorf("agent must return structured NDJSON events")
 }
 
-func splitAgentField(line string) (key, value string, ok bool) {
-	if line == "" {
-		return "", "", false
-	}
-	for _, sep := range []string{":", "：", "="} {
-		if idx := strings.Index(line, sep); idx > 0 {
-			key = strings.ToLower(strings.TrimSpace(line[:idx]))
-			value = strings.TrimSpace(line[idx+len(sep):])
-			switch key {
-			case "type", "thought", "command", "final":
-				return key, value, true
-			default:
-				return "", "", false
+func parseAgentEventText(content string) ([]AgentStreamEvent, AgentAction, error) {
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	events := make([]AgentStreamEvent, 0, len(lines))
+	lastSummary := ""
+	var action AgentAction
+	actionSeen := false
+	lineCount := 0
+
+	for _, raw := range lines {
+		line := strings.TrimSpace(raw)
+		if line == "" {
+			continue
+		}
+		lineCount++
+		event, err := parseAgentEventLine(line)
+		if err != nil {
+			return nil, AgentAction{}, err
+		}
+		events = append(events, event)
+		if event.Event == "summary" {
+			lastSummary = event.Summary
+		}
+		if event.Event == "action" && !actionSeen {
+			action = event.Action
+			if strings.TrimSpace(action.Thought) == "" {
+				action.Thought = lastSummary
 			}
+			actionSeen = true
 		}
 	}
-	return "", "", false
+
+	if lineCount == 0 {
+		return nil, AgentAction{}, fmt.Errorf("empty structured response")
+	}
+	if !actionSeen {
+		return nil, AgentAction{}, fmt.Errorf("missing action event")
+	}
+	return events, action, nil
+}
+
+func parseAgentStreamChunks(pending string, flush bool) ([]AgentStreamEvent, string, error) {
+	var events []AgentStreamEvent
+	rest := pending
+
+	for {
+		idx := strings.IndexByte(rest, '\n')
+		if idx < 0 {
+			break
+		}
+		line := strings.TrimSpace(rest[:idx])
+		rest = rest[idx+1:]
+		if line == "" {
+			continue
+		}
+		event, err := parseAgentEventLine(line)
+		if err != nil {
+			return nil, pending, err
+		}
+		events = append(events, event)
+	}
+
+	if flush {
+		line := strings.TrimSpace(rest)
+		if line == "" {
+			return events, "", nil
+		}
+		event, err := parseAgentEventLine(line)
+		if err != nil {
+			return nil, pending, err
+		}
+		events = append(events, event)
+		return events, "", nil
+	}
+
+	return events, rest, nil
+}
+
+func parseAgentEventLine(line string) (AgentStreamEvent, error) {
+	var event AgentStreamEvent
+	if err := json.Unmarshal([]byte(strings.TrimSpace(line)), &event); err == nil {
+		if normalized, ok := normalizeAgentStreamEvent(event); ok {
+			return normalized, nil
+		}
+	}
+
+	return AgentStreamEvent{}, fmt.Errorf("invalid agent stream event")
 }
 
 func normalizeAgentAction(action AgentAction) (AgentAction, bool) {
@@ -417,14 +486,40 @@ func normalizeAgentAction(action AgentAction) (AgentAction, bool) {
 		if action.Command == "" {
 			return AgentAction{}, false
 		}
+		action.Final = ""
 		return action, true
 	case "final":
 		if action.Final == "" {
 			return AgentAction{}, false
 		}
+		action.Command = ""
 		return action, true
 	default:
 		return AgentAction{}, false
+	}
+}
+
+func normalizeAgentStreamEvent(event AgentStreamEvent) (AgentStreamEvent, bool) {
+	event.Event = strings.ToLower(strings.TrimSpace(event.Event))
+	switch event.Event {
+	case "summary", "status":
+		event.Event = "summary"
+		event.Summary = strings.TrimSpace(event.Summary)
+		if event.Summary == "" {
+			return AgentStreamEvent{}, false
+		}
+		event.Action = AgentAction{}
+		return event, true
+	case "action":
+		action, ok := normalizeAgentAction(event.Action)
+		if !ok {
+			return AgentStreamEvent{}, false
+		}
+		event.Summary = ""
+		event.Action = action
+		return event, true
+	default:
+		return AgentStreamEvent{}, false
 	}
 }
 
