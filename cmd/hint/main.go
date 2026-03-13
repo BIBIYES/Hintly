@@ -1,12 +1,12 @@
 package main
 
 import (
-	"bufio"
 	"flag"
 	"fmt"
 	"os"
 	"strings"
 
+	"hint/internal/agent"
 	"hint/internal/ai"
 	"hint/internal/config"
 	"hint/internal/executor"
@@ -33,17 +33,17 @@ func main() {
 		os.Exit(1)
 	}
 
-	query := strings.TrimSpace(strings.Join(flag.Args(), " "))
-	if query == "" {
-		query = readPrompt("请输入需求: ")
-	}
-	if query == "" {
-		fmt.Fprintln(os.Stderr, "需求不能为空")
-		os.Exit(1)
-	}
-
 	env := sysinfo.Detect()
 	client := ai.NewClient(cfg)
+
+	query := strings.TrimSpace(strings.Join(flag.Args(), " "))
+	if query == "" {
+		if err := agent.Run(os.Stdin, os.Stdout, client, env); err != nil {
+			fmt.Fprintf(os.Stderr, "Agent 模式运行失败: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 
 	result, err := ui.Run(query, client, env)
 	if err != nil {
@@ -64,13 +64,4 @@ func main() {
 			os.Exit(1)
 		}
 	}
-}
-
-func readPrompt(label string) string {
-	fmt.Print(label)
-	s := bufio.NewScanner(os.Stdin)
-	if !s.Scan() {
-		return ""
-	}
-	return strings.TrimSpace(s.Text())
 }

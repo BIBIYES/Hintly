@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>简体中文</strong> | <a href="docs/i18n/README.en.md">English</a> | <a href="docs/i18n/README.ja.md">日本語</a> | <a href="docs/i18n/README.ko.md">한국어</a> | <a href="docs/i18n/README.es.md">Español</a> | <a href="docs/i18n/README.fr.md">Français</a> | <a href="docs/i18n/README.de.md">Deutsch</a> | <a href="docs/i18n/README.ru.md">Русский</a> | <a href="docs/i18n/README.pt-br.md">Português (BR)</a>
+  <strong>简体中文</strong> | <a href="docs/i18n/README.en.md">English</a>
 </p>
 
 <p align="center">
@@ -24,25 +24,17 @@
   </a>
 </p>
 
-## 多语言目录
+## 文档
 
 - 中文（主文档）：`README.md`
 - English：`docs/i18n/README.en.md`
-- 日本語：`docs/i18n/README.ja.md`
-- 한국어：`docs/i18n/README.ko.md`
-- Español：`docs/i18n/README.es.md`
-- Français：`docs/i18n/README.fr.md`
-- Deutsch：`docs/i18n/README.de.md`
-- Русский：`docs/i18n/README.ru.md`
-- Português (BR)：`docs/i18n/README.pt-br.md`
 
 ## 亮点
 
-- 忘记命令不用再到处查，直接问 `hint`。
-- 输入自然语言需求，返回可直接执行的终端命令。
+- 单次命令模式：`hint "你的需求"`。
+- Agent 对话模式：仅输入 `hint` 进入多轮执行模式（思考 -> 执行 -> 读取结果 -> 再决策）。
 - 自动注入环境上下文：`GOOS`、发行版、Shell、当前工作目录。
-- TUI 交互体验：加载状态、命令高亮、重试、编辑、一键执行。
-- 安全扫描：命中危险命令关键字时，执行前必须手动输入 `y`。
+- 内置安全扫描：命中危险命令关键字会阻断执行。
 
 ## 快速开始
 
@@ -59,10 +51,16 @@ go build ./cmd/hint
 ./hint -init
 ```
 
-3. 直接提问：
+3. 单次命令模式：
 
 ```bash
 ./hint "查看 fail2ban sshd 封禁情况"
+```
+
+4. Agent 对话模式：
+
+```bash
+./hint
 ```
 
 ## Linux 一键安装/更新
@@ -89,12 +87,18 @@ curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install
 
 ![Hintly usage screenshot](assets/image.png)
 
-## 快捷键
+## 单次命令模式快捷键
 
 - `Enter`：执行当前命令。
-- `r`：重试（追加“上一个建议不满意，请换一种实现方式”）。
+- `r`：重试（会附带上一条不满意命令作为上下文）。
 - `e`：编辑命令后按 `Enter` 执行。
 - `Esc` / `Ctrl+C`：取消并退出。
+
+## Agent 对话模式说明
+
+- 输入目标后，Agent 会自动执行多步命令，直到完成或达到最大步数上限。
+- 终端会显示每一步的思考、命令和命令输出。
+- 输入 `exit` 或 `quit` 退出对话模式。
 
 ## 配置文件路径
 
@@ -107,35 +111,4 @@ curl -fsSL https://raw.githubusercontent.com/BIBIYES/Hintly/main/scripts/install
 base_url: https://api.openai.com/v1
 api_key: sk-xxxx
 model: gpt-4o
-```
-
-## 目录结构
-
-```text
-hint/
-├── cmd/
-│   └── hint/
-│       └── main.go
-├── internal/
-│   ├── ai/
-│   ├── config/
-│   ├── executor/
-│   └── ui/
-├── pkg/
-│   └── sysinfo/
-├── assets/
-│   ├── logo.png
-│   └── image.png
-├── docs/
-│   └── i18n/
-│       ├── README.en.md
-│       ├── README.ja.md
-│       ├── README.ko.md
-│       ├── README.es.md
-│       ├── README.fr.md
-│       ├── README.de.md
-│       ├── README.ru.md
-│       └── README.pt-br.md
-├── go.mod
-└── README.md
 ```

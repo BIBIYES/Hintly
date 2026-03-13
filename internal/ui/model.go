@@ -40,12 +40,11 @@ type model struct {
 	spin   spinner.Model
 	input  textinput.Model
 
-	mode        mode
-	suggestion  string
-	pendingCmd  string
-	lastErr     error
-	retryPrompt bool
-	result      Result
+	mode       mode
+	suggestion string
+	pendingCmd string
+	lastErr    error
+	result     Result
 }
 
 type suggestionMsg struct {
@@ -97,14 +96,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case modeReady:
 			return m.handleReadyKey(msg)
 		case modeEditing:
-			return m.handleEditKey(msg)
+			next, cmd := m.handleEditKey(msg)
+			return next, cmd
 		case modeConfirmDanger:
 			return m.handleConfirmKey(msg)
 		case modeError:
 			if msg.String() == "r" {
 				m.mode = modeLoading
 				m.lastErr = nil
-				m.retryPrompt = true
 				return m, tea.Batch(m.spin.Tick, m.fetchCmd(true))
 			}
 		}
@@ -126,12 +125,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.spin, cmd = m.spin.Update(msg)
 			return m, cmd
 		}
-	}
-
-	if m.mode == modeEditing {
-		var cmd tea.Cmd
-		m.input, cmd = m.input.Update(msg)
-		return m, cmd
 	}
 	return m, nil
 }
@@ -180,11 +173,16 @@ func (m model) View() string {
 }
 
 func (m model) fetchCmd(retry bool) tea.Cmd {
+	previous := ""
+	if retry {
+		previous = m.suggestion
+	}
 	return func() tea.Msg {
 		cmd, err := m.client.SuggestCommand(context.Background(), ai.Request{
-			UserPrompt: m.query,
-			Env:        m.env,
-			Retry:      retry,
+			UserPrompt:      m.query,
+			Env:             m.env,
+			Retry:           retry,
+			PreviousCommand: previous,
 		})
 		return suggestionMsg{command: cmd, err: err}
 	}
@@ -216,7 +214,8 @@ func (m model) handleReadyKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "enter" {
+	switch msg.String() {
+	case "enter":
 		cmd := strings.TrimSpace(m.input.Value())
 		if cmd == "" {
 			return m, nil
@@ -229,8 +228,11 @@ func (m model) handleEditKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.result.Execute = true
 		m.result.Command = cmd
 		return m, tea.Quit
+	default:
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(msg)
+		return m, cmd
 	}
-	return m, nil
 }
 
 func (m model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
