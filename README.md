@@ -29,6 +29,18 @@
 - 中文（主文档）：`README.md`
 - English：`docs/i18n/README.en.md`
 
+## 界面预览
+
+### 单次命令模式
+
+![Hintly single command mode](assets/image.png)
+
+### Agent 对话模式
+
+`assets/image1.png` 展示的是对话模式下的用户界面：
+
+![Hintly agent chat mode](assets/image1.png)
+
 ## 亮点
 
 - 单次命令模式：`hint "你的需求"`，快速生成并执行单条命令。
@@ -112,18 +124,6 @@ hint "查看 fail2ban sshd 封禁情况"
 ```bash
 hint
 ```
-
-## 界面预览
-
-### 单次命令模式
-
-![Hintly single command mode](assets/image.png)
-
-### Agent 对话模式
-
-`assets/image1.png` 展示的是对话模式下的用户界面：
-
-![Hintly agent chat mode](assets/image1.png)
 
 ## 单次命令模式快捷键
 
