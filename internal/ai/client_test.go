@@ -1,9 +1,14 @@
 package ai
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
+	"hint/internal/executor"
 	"hint/pkg/sysinfo"
 )
 
@@ -126,5 +131,73 @@ func TestBuildAgentChatRequestIncludesSessionHistory(t *testing.T) {
 		if !strings.Contains(userContent, want) {
 			t.Fatalf("expected user content to include %q, got: %s", want, userContent)
 		}
+	}
+}
+
+func TestSanitizePreservesMultilineCommands(t *testing.T) {
+	raw := "```bash\ncat <<'EOF' > note.txt\n第一行，带中文标点：你好。\n第二行\nEOF\n```"
+
+	got := sanitize(raw)
+	want := "cat <<'EOF' > note.txt\n第一行，带中文标点：你好。\n第二行\nEOF"
+	if got != want {
+		t.Fatalf("unexpected sanitized command:\n got: %q\nwant: %q", got, want)
+	}
+}
+
+func TestParseAgentActionTextPreservesMultilineCommand(t *testing.T) {
+	input := "{\"event\":\"summary\",\"summary\":\"写入文件\"}\n" +
+		"{\"event\":\"action\",\"action\":{\"type\":\"command\",\"command\":\"cat <<'EOF' > note.txt\\n第一行，带中文标点：你好。\\n第二行\\nEOF\"}}"
+
+	got, err := parseAgentActionText(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := "cat <<'EOF' > note.txt\n第一行，带中文标点：你好。\n第二行\nEOF"
+	if got.Command != want {
+		t.Fatalf("unexpected command:\n got: %q\nwant: %q", got.Command, want)
+	}
+}
+
+func TestParseAgentActionTextSupportsFencedNdjson(t *testing.T) {
+	input := "```json\n" +
+		"{\"event\":\"summary\",\"summary\":\"检查完成\"}\n" +
+		"{\"event\":\"action\",\"action\":{\"type\":\"final\",\"final\":\"一切正常\"}}\n" +
+		"```"
+
+	got, err := parseAgentActionText(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got.Type != "final" || got.Final != "一切正常" {
+		t.Fatalf("unexpected action: %+v", got)
+	}
+}
+
+func TestSanitizedHereDocCommandWritesFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("heredoc command is shell-specific")
+	}
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "note.txt")
+	raw := "```bash\ncat <<'EOF' > \"" + target + "\"\n第一行，带中文标点：你好。\n第二行\nEOF\n```"
+
+	command := sanitize(raw)
+	output, exitCode, err := executor.RunCapture(command, 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected execution error: %v", err)
+	}
+	if exitCode != 0 {
+		t.Fatalf("unexpected exit code %d with output %q", exitCode, output)
+	}
+
+	data, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatalf("read file: %v", err)
+	}
+	want := "第一行，带中文标点：你好。\n第二行\n"
+	if string(data) != want {
+		t.Fatalf("unexpected file content:\n got: %q\nwant: %q", string(data), want)
 	}
 }

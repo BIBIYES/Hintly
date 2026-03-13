@@ -105,7 +105,7 @@ func (c *Client) SuggestCommand(ctx context.Context, req Request) (string, error
 		Messages: []chatMessage{
 			{
 				Role: "system",
-				Content: fmt.Sprintf("你是命令行助手。仅输出一个可直接执行的原始命令，不要解释、不要 Markdown、不要代码块。\n环境信息: GOOS=%s, Distro=%s, Shell=%s, PWD=%s",
+				Content: fmt.Sprintf("你是命令行助手。仅输出一个可直接执行的原始 shell 命令，不要解释、不要 Markdown、不要代码块。必要时可使用换行组成单条 shell 命令（例如 heredoc 写文件）。shell 语法必须使用 ASCII 标点，禁止中文引号、中文冒号等全角符号。\n环境信息: GOOS=%s, Distro=%s, Shell=%s, PWD=%s",
 					req.Env.GOOS,
 					req.Env.Distro,
 					req.Env.Shell,
@@ -320,8 +320,9 @@ func (c *Client) buildAgentChatRequest(req AgentRequest, stream bool) (chatReque
 					"1) summary 必须简短、客观，不要把尚未执行的命令说成已经完成。\n"+
 					"2) 未完成时 action.type 必须是 command。\n"+
 					"3) 完成或无法继续时 action.type 必须是 final。\n"+
-					"4) command 必须是单条可执行命令。\n"+
-					"5) 除这两行 JSON 外不要输出任何其他内容。\n"+
+					"4) command 必须是单条可执行 shell 命令，必要时可使用换行组成单条命令（例如 heredoc 写文件）。\n"+
+					"5) shell 语法必须使用 ASCII 标点，禁止中文引号、中文冒号等全角符号。\n"+
+					"6) 除这两行 JSON 外不要输出任何其他内容。\n"+
 					"环境信息: GOOS=%s, Distro=%s, Shell=%s, PWD=%s",
 					req.Env.GOOS,
 					req.Env.Distro,
@@ -352,23 +353,47 @@ func chatCompletionsEndpoint(baseURL string) string {
 
 func sanitize(v string) string {
 	s := strings.TrimSpace(v)
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
-	s = strings.TrimSpace(s)
-	s = strings.Trim(s, "`")
-	s = strings.TrimSpace(s)
-
-	lines := strings.Split(s, "\n")
-	if len(lines) == 0 {
+	if s == "" {
 		return ""
 	}
-	return strings.TrimSpace(lines[0])
+
+	if unwrapped, ok := unwrapCodeFence(s); ok {
+		s = unwrapped
+	}
+
+	if strings.HasPrefix(s, "`") && strings.HasSuffix(s, "`") {
+		s = strings.TrimSpace(strings.Trim(s, "`"))
+	}
+
+	return strings.TrimSpace(s)
+}
+
+func unwrapCodeFence(s string) (string, bool) {
+	if !strings.HasPrefix(s, "```") || !strings.HasSuffix(s, "```") {
+		return s, false
+	}
+
+	lines := strings.Split(s, "\n")
+	if len(lines) == 1 {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "```"), "```")), true
+	}
+
+	last := len(lines) - 1
+	for last > 0 && strings.TrimSpace(lines[last]) == "" {
+		last--
+	}
+	if strings.TrimSpace(lines[last]) != "```" {
+		return s, false
+	}
+
+	return strings.TrimSpace(strings.Join(lines[1:last], "\n")), true
 }
 
 func parseAgentActionText(content string) (AgentAction, error) {
 	s := strings.TrimSpace(content)
-	s = strings.TrimPrefix(s, "```")
-	s = strings.TrimSuffix(s, "```")
+	if unwrapped, ok := unwrapCodeFence(s); ok {
+		s = unwrapped
+	}
 	s = strings.TrimSpace(s)
 
 	if _, action, err := parseAgentEventText(s); err == nil {
